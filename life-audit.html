@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Life Audit</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f0f1a; }
+    input::placeholder { color: #555570; }
+    input:focus { border-color: rgba(124,58,237,0.5) !important; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 99px; }
+    @keyframes pulse { 0%,100% { opacity: 0.4; transform: scale(1); } 50% { opacity: 1; transform: scale(1.3); } }
+    @keyframes dotBounce { 0%,80%,100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-6px); opacity: 1; } }
+    .dot { animation: dotBounce 1.2s infinite; }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const AREAS = [
+      { id: "work", label: "Work & Career", emoji: "💼" },
+      { id: "health", label: "Health & Energy", emoji: "⚡" },
+      { id: "relationships", label: "Relationships & Social", emoji: "🤝" },
+      { id: "fun", label: "Fun & Hobbies", emoji: "🎉" },
+      { id: "finances", label: "Finances", emoji: "💰" },
+      { id: "growth", label: "Personal Growth & Mindset", emoji: "🧠" },
+      { id: "home", label: "Home & Environment", emoji: "🏠" },
+    ];
+
+    const SYSTEM_PROMPT = `You are a thoughtful, honest, and warm life coach conducting a quarterly Life Audit. Your job is to ask ONE question at a time across 7 life areas, then produce a final report.
+
+Life areas to cover (in order): Work & Career, Health & Energy, Relationships & Social, Fun & Hobbies, Finances, Personal Growth & Mindset, Home & Environment.
+
+Ask 2-3 probing questions per area. Questions should be specific, introspective, and occasionally gently uncomfortable — not surface level. Then naturally transition to the next area.
+
+When all areas are covered, output a JSON block (wrapped in \`\`\`json ... \`\`\`) with this exact structure:
+{
+  "scores": { "work": 7, "health": 5, "relationships": 8, "fun": 4, "finances": 6, "growth": 7, "home": 6 },
+  "blindSpot": "A specific, honest observation about their biggest overlooked area",
+  "experiment": "One concrete, specific, slightly uncomfortable experiment to try this week",
+  "summary": "A 2-3 sentence honest overall summary of where they are right now"
+}
+
+Scoring: 1-10 based on everything they shared. Be honest, not generous.
+
+Rules:
+- One question at a time only
+- Be warm but honest — don't sugarcoat
+- Reference things they said earlier to show you're tracking
+- Keep questions conversational, not clinical
+- Start by warmly welcoming them and asking the first question about Work & Career`;
+
+    // Simple localStorage-based storage (works when hosted)
+    const storage = {
+      get: (key) => { try { const v = localStorage.getItem(key); return v ? { value: v } : null; } catch { return null; } },
+      set: (key, value) => { try { localStorage.setItem(key, value); return true; } catch { return false; } },
+    };
+
+    function ScoreBar({ score, small }) {
+      const color = score >= 7 ? "#10b981" : score >= 5 ? "#f59e0b" : "#ef4444";
+      return (
+        <div style={{ background: "#1e1e2e", borderRadius: 99, height: small ? 6 : 8, overflow: "hidden", flex: 1 }}>
+          <div style={{ width: `${score * 10}%`, height: "100%", background: color, borderRadius: 99, transition: "width 1s ease" }} />
+        </div>
+      );
+    }
+
+    function App() {
+      const [view, setView] = useState("home");
+      const [messages, setMessages] = useState([]);
+      const [input, setInput] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [report, setReport] = useState(null);
+      const [history, setHistory] = useState([]);
+      const currentDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+      const messagesEndRef = useRef(null);
+
+      useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+      useEffect(() => {
+        const result = storage.get("life-audit-history");
+        if (result) { try { setHistory(JSON.parse(result.value)); } catch {} }
+      }, []);
+
+      const saveAudit = (reportData) => {
+        const newEntry = { date: currentDate, timestamp: Date.now(), ...reportData };
+        const updated = [newEntry, ...history].slice(0, 8);
+        setHistory(updated);
+        storage.set("life-audit-history", JSON.stringify(updated));
+      };
+
+      const callClaude = async (msgs, extraSystem = "") => {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            system: SYSTEM_PROMPT + extraSystem,
+            messages: msgs,
+          }),
+        });
+        const data = await res.json();
+        return data.content[0].text;
+      };
+
+      const startAudit = async () => {
+        setMessages([]);
+        setReport(null);
+        setView("audit");
+        setLoading(true);
+        const prevContext = history.length > 0
+          ? `\n\nPrevious audit (${history[0].date}): scores were ${JSON.stringify(history[0].scores)}. Reference this subtly if relevant.`
+          : "";
+        try {
+          const initMsg = [{ role: "user", content: "Let's begin my life audit." }];
+          const text = await callClaude(initMsg, prevContext);
+          setMessages([...initMsg, { role: "assistant", content: text }]);
+        } catch { setMessages([{ role: "assistant", content: "Something went wrong. Please refresh and try again." }]); }
+        setLoading(false);
+      };
+
+      const sendMessage = async () => {
+        if (!input.trim() || loading) return;
+        const userMsg = { role: "user", content: input.trim() };
+        const newMessages = [...messages, userMsg];
+        setMessages(newMessages);
+        setInput("");
+        setLoading(true);
+        try {
+          const text = await callClaude(newMessages);
+          const assistantMsg = { role: "assistant", content: text };
+          setMessages([...newMessages, assistantMsg]);
+          const jsonMatch = text.match(/```json([\s\S]*?)```/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[1].trim());
+            setReport(parsed);
+            saveAudit(parsed);
+            setTimeout(() => setView("report"), 1200);
+          }
+        } catch { setMessages(prev => [...prev, { role: "assistant", content: "Something went wrong. Please try again." }]); }
+        setLoading(false);
+      };
+
+      // HOME
+      if (view === "home") return (
+        <div style={{ minHeight: "100vh", background: "linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #0f0f1a 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "'Inter', -apple-system, sans-serif" }}>
+          <div style={{ maxWidth: 520, width: "100%", textAlign: "center" }}>
+            <div style={{ fontSize: 64, marginBottom: 16 }}>🔍</div>
+            <h1 style={{ color: "#fff", fontSize: 36, fontWeight: 700, margin: "0 0 8px", letterSpacing: -1 }}>Life Audit</h1>
+            <p style={{ color: "#8b8ba7", fontSize: 16, lineHeight: 1.6, margin: "0 0 40px" }}>
+              A quarterly check-in across every area of your life.<br/>Honest scores, real insights, one experiment to try.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 40 }}>
+              {AREAS.map(a => (
+                <div key={a.id} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, textAlign: "left" }}>
+                  <span style={{ fontSize: 18 }}>{a.emoji}</span>
+                  <span style={{ color: "#c4c4d4", fontSize: 13, fontWeight: 500 }}>{a.label}</span>
+                </div>
+              ))}
+            </div>
+            <button onClick={startAudit} style={{ background: "linear-gradient(135deg, #7c3aed, #6d28d9)", color: "#fff", border: "none", borderRadius: 14, padding: "16px 40px", fontSize: 16, fontWeight: 600, cursor: "pointer", marginBottom: 16, width: "100%", letterSpacing: 0.3 }}>
+              Begin Audit — {currentDate}
+            </button>
+            {history.length > 0 && (
+              <button onClick={() => setView("history")} style={{ background: "transparent", color: "#8b8ba7", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "12px 40px", fontSize: 14, cursor: "pointer", width: "100%" }}>
+                View Past Audits ({history.length})
+              </button>
+            )}
+          </div>
+        </div>
+      );
+
+      // AUDIT
+      if (view === "audit") return (
+        <div style={{ minHeight: "100vh", background: "#0f0f1a", display: "flex", flexDirection: "column", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+          <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", gap: 12, background: "#0f0f1a", position: "sticky", top: 0, zIndex: 10 }}>
+            <button onClick={() => setView("home")} style={{ background: "transparent", border: "none", color: "#8b8ba7", cursor: "pointer", fontSize: 20, padding: 0 }}>←</button>
+            <span style={{ color: "#fff", fontWeight: 600 }}>Life Audit · {currentDate}</span>
+            {loading && <div style={{ marginLeft: "auto", width: 8, height: 8, background: "#7c3aed", borderRadius: "50%", animation: "pulse 1s infinite" }} />}
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "20px 16px", display: "flex", flexDirection: "column", gap: 16, maxWidth: 640, margin: "0 auto", width: "100%" }}>
+            {messages.filter(m => !(m.role === "user" && m.content === "Let's begin my life audit.")).map((msg, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
+                <div style={{ maxWidth: "80%", background: msg.role === "user" ? "linear-gradient(135deg, #7c3aed, #6d28d9)" : "rgba(255,255,255,0.06)", border: msg.role === "user" ? "none" : "1px solid rgba(255,255,255,0.08)", borderRadius: msg.role === "user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px", padding: "12px 16px", color: "#fff", fontSize: 15, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>
+                  {msg.content.replace(/```json[\s\S]*?```/, "").trim()}
+                </div>
+              </div>
+            ))}
+            {loading && (
+              <div style={{ display: "flex", gap: 6, padding: "12px 16px" }}>
+                <div className="dot" style={{ width: 8, height: 8, background: "#7c3aed", borderRadius: "50%" }} />
+                <div className="dot" style={{ width: 8, height: 8, background: "#7c3aed", borderRadius: "50%" }} />
+                <div className="dot" style={{ width: 8, height: 8, background: "#7c3aed", borderRadius: "50%" }} />
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+          <div style={{ padding: "12px 16px", borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", gap: 10, maxWidth: 640, margin: "0 auto", width: "100%" }}>
+            <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()} placeholder="Your answer..." disabled={loading} style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12, padding: "12px 16px", color: "#fff", fontSize: 15, outline: "none", fontFamily: "inherit" }} />
+            <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ background: "linear-gradient(135deg, #7c3aed, #6d28d9)", border: "none", borderRadius: 12, padding: "12px 20px", color: "#fff", cursor: "pointer", fontSize: 18, opacity: loading || !input.trim() ? 0.4 : 1 }}>→</button>
+          </div>
+        </div>
+      );
+
+      // REPORT
+      if (view === "report" && report) {
+        const avg = Math.round(Object.values(report.scores).reduce((a, b) => a + b, 0) / 7);
+        const lowest = AREAS.reduce((a, b) => report.scores[a.id] < report.scores[b.id] ? a : b);
+        const highest = AREAS.reduce((a, b) => report.scores[a.id] > report.scores[b.id] ? a : b);
+        const prev = history.length > 1 ? history[1] : null;
+        return (
+          <div style={{ minHeight: "100vh", background: "#0f0f1a", fontFamily: "'Inter', -apple-system, sans-serif", paddingBottom: 40 }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, background: "#0f0f1a", zIndex: 10 }}>
+              <button onClick={() => setView("home")} style={{ background: "transparent", border: "none", color: "#8b8ba7", cursor: "pointer", fontSize: 20, padding: 0 }}>←</button>
+              <span style={{ color: "#fff", fontWeight: 600 }}>Your Results · {currentDate}</span>
+              {history.length > 1 && <button onClick={() => setView("history")} style={{ marginLeft: "auto", background: "transparent", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "4px 12px", color: "#8b8ba7", cursor: "pointer", fontSize: 12 }}>History</button>}
+            </div>
+            <div style={{ maxWidth: 540, margin: "0 auto", padding: "24px 20px" }}>
+              <div style={{ textAlign: "center", marginBottom: 32 }}>
+                <div style={{ fontSize: 72, fontWeight: 800, background: "linear-gradient(135deg, #7c3aed, #a78bfa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", lineHeight: 1 }}>{avg}</div>
+                <div style={{ color: "#8b8ba7", fontSize: 14, marginTop: 4 }}>Overall Score</div>
+                <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 16 }}>
+                  <span style={{ color: "#10b981", fontSize: 13 }}>↑ {highest.emoji} {highest.label}</span>
+                  <span style={{ color: "#ef4444", fontSize: 13 }}>↓ {lowest.emoji} {lowest.label}</span>
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 20, marginBottom: 16 }}>
+                <h3 style={{ color: "#fff", margin: "0 0 16px", fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, opacity: 0.5 }}>Area Scores</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {AREAS.map(area => {
+                    const score = report.scores[area.id];
+                    const delta = prev?.scores?.[area.id] ? score - prev.scores[area.id] : null;
+                    return (
+                      <div key={area.id} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ fontSize: 16, width: 20 }}>{area.emoji}</span>
+                        <span style={{ color: "#c4c4d4", fontSize: 13, width: 160, flexShrink: 0 }}>{area.label}</span>
+                        <ScoreBar score={score} />
+                        <span style={{ color: "#fff", fontSize: 14, fontWeight: 700, width: 20 }}>{score}</span>
+                        {delta !== null && <span style={{ fontSize: 12, color: delta > 0 ? "#10b981" : delta < 0 ? "#ef4444" : "#8b8ba7", width: 28 }}>{delta > 0 ? `+${delta}` : delta || "—"}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 20, marginBottom: 16 }}>
+                <h3 style={{ color: "#fff", margin: "0 0 10px", fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, opacity: 0.5 }}>Where You Are</h3>
+                <p style={{ color: "#c4c4d4", fontSize: 15, lineHeight: 1.7 }}>{report.summary}</p>
+              </div>
+              <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 16, padding: 20, marginBottom: 16 }}>
+                <h3 style={{ color: "#ef4444", margin: "0 0 10px", fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>🔦 Blind Spot</h3>
+                <p style={{ color: "#c4c4d4", fontSize: 15, lineHeight: 1.7 }}>{report.blindSpot}</p>
+              </div>
+              <div style={{ background: "rgba(124,58,237,0.1)", border: "1px solid rgba(124,58,237,0.3)", borderRadius: 16, padding: 20 }}>
+                <h3 style={{ color: "#a78bfa", margin: "0 0 10px", fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>🧪 Try This Week</h3>
+                <p style={{ color: "#c4c4d4", fontSize: 15, lineHeight: 1.7 }}>{report.experiment}</p>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // HISTORY
+      if (view === "history") return (
+        <div style={{ minHeight: "100vh", background: "#0f0f1a", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+          <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", gap: 12, position: "sticky", top: 0, background: "#0f0f1a", zIndex: 10 }}>
+            <button onClick={() => setView("home")} style={{ background: "transparent", border: "none", color: "#8b8ba7", cursor: "pointer", fontSize: 20, padding: 0 }}>←</button>
+            <span style={{ color: "#fff", fontWeight: 600 }}>Past Audits</span>
+          </div>
+          <div style={{ maxWidth: 540, margin: "0 auto", padding: "24px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+            {history.map((audit, i) => {
+              const avg = Math.round(Object.values(audit.scores).reduce((a, b) => a + b, 0) / 7);
+              return (
+                <div key={i} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 16, padding: 20 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                    <span style={{ color: "#fff", fontWeight: 600 }}>{audit.date}</span>
+                    <span style={{ fontSize: 28, fontWeight: 800, background: "linear-gradient(135deg, #7c3aed, #a78bfa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>{avg}</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {AREAS.map(area => (
+                      <div key={area.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ fontSize: 13, width: 16 }}>{area.emoji}</span>
+                        <ScoreBar score={audit.scores[area.id]} small />
+                        <span style={{ color: "#8b8ba7", fontSize: 12, width: 16 }}>{audit.scores[area.id]}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {audit.experiment && (
+                    <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(124,58,237,0.1)", borderRadius: 10 }}>
+                      <span style={{ color: "#a78bfa", fontSize: 12 }}>🧪 {audit.experiment}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+
+      return null;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
